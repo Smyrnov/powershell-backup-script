@@ -40,20 +40,28 @@ Add-Type -AssemblyName System.Collections.Concurrent
 $logQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 $errorQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 
-# Function to enqueue logs
+# Function to enqueue logs with optional console output
 function Enqueue-Log {
     param (
-        [string]$Message
+        [string]$Message,
+        [switch]$Output
     )
     $logQueue.Enqueue($Message)
+    if ($Output) {
+        Write-Host $Message
+    }
 }
 
-# Function to enqueue errors
+# Function to enqueue errors with optional console output
 function Enqueue-ErrorLog {
     param (
-        [string]$Message
+        [string]$Message,
+        [switch]$Output
     )
     $errorQueue.Enqueue($Message)
+    if ($Output) {
+        Write-Host $Message -ForegroundColor Red
+    }
 }
 
 # Set default log file path if not provided
@@ -67,31 +75,31 @@ if (-not $LogFilePath) {
 }
 
 # Start logging
-Enqueue-Log "Backup script started."
+Enqueue-Log "Backup script started." -Output
 
 # Main execution block with error handling
 try {
     # Install PnP.PowerShell Module if not already installed
     if (!(Get-Module -ListAvailable -Name PnP.PowerShell)) {
-        Enqueue-Log "Installing PnP.PowerShell module."
+        Enqueue-Log "Installing PnP.PowerShell module."  -Output
         try {
             Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-            Enqueue-Log "PnP.PowerShell module installed successfully."
+            Enqueue-Log "PnP.PowerShell module installed successfully." -Output
         }
         catch {
-            Enqueue-ErrorLog "Error installing PnP.PowerShell module: $_"
+            Enqueue-ErrorLog "Error installing PnP.PowerShell module: $_" -Output
             throw
         }
     }
 
     # Connect to SharePoint Online Site using the registered Entra ID application
     try {
-        Enqueue-Log "Connecting to SharePoint Online site: $SiteUrl"
+        Enqueue-Log "Connecting to SharePoint Online site: $SiteUrl" -Output
         Connect-PnPOnline -Url $SiteUrl -ClientId $ClientId -Tenant $TenantId -Interactive -ErrorAction Stop
-        Enqueue-Log "Successfully connected to SharePoint Online."
+        Enqueue-Log "Successfully connected to SharePoint Online." -Output
     }
     catch {
-        Enqueue-ErrorLog "Error connecting to SharePoint Online: $_"
+        Enqueue-ErrorLog "Error connecting to SharePoint Online: $_" -Output
         throw
     }
 
@@ -100,7 +108,7 @@ try {
         $Site = Get-PnPWeb -ErrorAction Stop
     }
     catch {
-        Enqueue-ErrorLog "Error retrieving site information: $_"
+        Enqueue-ErrorLog "Error retrieving site information: $_" -Output
         throw
     }
 
@@ -113,7 +121,7 @@ try {
             [datetime]$CreatedDate
         )
 
-        Enqueue-Log "Processing: $ServerRelativeUrl"
+        Enqueue-Log "Processing: $ServerRelativeUrl" -Output
 
         # Try to get the folder
         try {
@@ -258,7 +266,7 @@ try {
         }
         else {
             # It might be a Document Library
-            Enqueue-Log "Attempting to retrieve items from Document Library at '$ServerRelativeUrl'"
+            Enqueue-Log "Attempting to retrieve items from Document Library at '$ServerRelativeUrl'" -Output
 
             # Get the list (Document Library)
             try {
@@ -400,7 +408,7 @@ try {
     # Begin the download process
     if ($SubFolderServerRelativeUrl) {
         # Start downloading from the specified subfolder or library
-        Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl"
+        Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl" -Output
 
         # Ensure the path starts with '/'
         if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
@@ -413,12 +421,12 @@ try {
     else {
         # Retrieve All Document Libraries
         try {
-            Enqueue-Log "Retrieving document libraries."
+            Enqueue-Log "Retrieving document libraries." -Output
             $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
             Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)"
         }
         catch {
-            Enqueue-ErrorLog "Error retrieving document libraries: $_"
+            Enqueue-ErrorLog "Error retrieving document libraries: $_" -Output
             throw
         }
 
@@ -449,7 +457,7 @@ try {
     }
 }
 catch {
-    Enqueue-ErrorLog "An unexpected error occurred: $_"
+    Enqueue-ErrorLog "An unexpected error occurred: $_" -Output
 }
 finally {
     # Finalize logging
@@ -490,14 +498,14 @@ finally {
     # Disconnect from SharePoint Online
     try {
         Disconnect-PnPOnline -ErrorAction Stop
-        Enqueue-Log "Disconnected from SharePoint Online."
+        Enqueue-Log "Disconnected from SharePoint Online." -Output
     }
     catch {
-        Enqueue-ErrorLog "Error disconnecting from SharePoint Online: $_"
+        Enqueue-ErrorLog "Error disconnecting from SharePoint Online: $_" -Output
     }
 
     # Write completion log
-    Enqueue-Log "Backup script completed."
+    Enqueue-Log "Backup script completed." -Output
 
     # Write any remaining logs to the log file
     while ($logQueue.TryDequeue([ref]$log)) {
