@@ -1,4 +1,4 @@
-# Requires PowerShell 7 or later
+# Requires PowerShell 5.1 or later
 
 # Parameters
 param(
@@ -18,17 +18,17 @@ param(
     [string]$SubFolderServerRelativeUrl,  # Server-relative URL of the library or folder
 
     [Parameter(Mandatory = $false)]
-    [datetime]$LastModifiedDate,          # Optional parameter for filtering based on last modified date
+    $LastModifiedDate,          # Optional parameter for filtering based on last modified date
 
     [Parameter(Mandatory = $false)]
-    [datetime]$CreatedDate,               # Optional parameter for filtering based on created date
+    $CreatedDate,               # Optional parameter for filtering based on created date
 
     [string]$LogFilePath
 )
 
-# Ensure PowerShell 7 or later is being used
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Error "This script requires PowerShell version 7 or later."
+# Ensure PowerShell 5.1 or later is being used
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    Write-Error "This script requires PowerShell version 5.1 or later."
     exit 1
 }
 
@@ -114,8 +114,8 @@ function Download-Files {
     param (
         [string]$ServerRelativeUrl,
         [string]$LocalPath,
-        [datetime?]$LastModifiedDate,
-        [datetime?]$CreatedDate
+        $LastModifiedDate,
+        $CreatedDate
     )
 
     Enqueue-Log "Processing: $ServerRelativeUrl"
@@ -179,65 +179,75 @@ function Download-Files {
         if ($filesToDownload.Count -gt 0) {
             Enqueue-Log "Starting parallel download of $($filesToDownload.Count) files from $ServerRelativeUrl"
 
-            $filesToDownload | ForEach-Object -Parallel {
-                param($fileUrl, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue)
+            $jobs = @()
 
-                try {
-                    # Determine the local file path
-                    $fileName = Split-Path $fileUrl -Leaf
-                    $destinationPath = Join-Path $using:LocalPath $fileName
+            foreach ($fileUrl in $filesToDownload) {
+                $jobs += Start-Job -ScriptBlock {
+                    param($fileUrl, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue)
 
-                    $downloadFile = $true
+                    try {
+                        # Determine the local file path
+                        $fileName = Split-Path $fileUrl -Leaf
+                        $destinationPath = Join-Path $LocalPath $fileName
 
-                    if ($using:LastModifiedDate -or $using:CreatedDate) {
-                        if (Test-Path $destinationPath) {
-                            # Get the SharePoint file's last modified and creation dates
-                            $spFile = Get-PnPFile -Url $fileUrl -AsListItem -ErrorAction Stop
-                            $spLastModified = [datetime]$spFile["Modified"]
-                            $spCreated = [datetime]$spFile["Created"]
+                        $downloadFile = $true
 
-                            # Determine if file should be downloaded
-                            $shouldDownload = $false
+                        if ($LastModifiedDate -or $CreatedDate) {
+                            if (Test-Path $destinationPath) {
+                                # Get the SharePoint file's last modified and creation dates
+                                $spFile = Get-PnPFile -Url $fileUrl -AsListItem -ErrorAction Stop
+                                $spLastModified = [datetime]$spFile["Modified"]
+                                $spCreated = [datetime]$spFile["Created"]
 
-                            if ($using:LastModifiedDate) {
-                                if ($spLastModified -gt $using:LastModifiedDate) {
-                                    $shouldDownload = $true
+                                # Determine if file should be downloaded
+                                $shouldDownload = $false
+
+                                if ($LastModifiedDate) {
+                                    if ($spLastModified -gt $LastModifiedDate) {
+                                        $shouldDownload = $true
+                                    }
+                                }
+
+                                if ($CreatedDate) {
+                                    if ($spCreated -gt $CreatedDate) {
+                                        $shouldDownload = $true
+                                    }
+                                }
+
+                                if (-not $shouldDownload) {
+                                    # Skip downloading
+                                    $logQueue.Enqueue("Skipped file (not created/modified after specified dates): $fileUrl")
+                                    $downloadFile = $false
                                 }
                             }
-
-                            if ($using:CreatedDate) {
-                                if ($spCreated -gt $using:CreatedDate) {
-                                    $shouldDownload = $true
-                                }
-                            }
-
-                            if (-not $shouldDownload) {
-                                # Skip downloading
-                                $logQueue.Enqueue("Skipped file (not created/modified after specified dates): $fileUrl")
-                                $downloadFile = $false
+                            else {
+                                # File does not exist locally; download it
+                                $downloadFile = $true
                             }
                         }
-                        else {
-                            # File does not exist locally; download it
-                            $downloadFile = $true
+
+                        if ($downloadFile) {
+                            # Ensure the local directory exists
+                            if (!(Test-Path $LocalPath)) {
+                                New-Item -ItemType Directory -Path $LocalPath -Force | Out-Null
+                            }
+
+                            # Download the file
+                            Get-PnPFile -Url $fileUrl -Path $LocalPath -FileName $fileName -AsFile -Force -ErrorAction Stop
+                            $logQueue.Enqueue("Downloaded file: $fileUrl")
                         }
                     }
-
-                    if ($downloadFile) {
-                        # Ensure the local directory exists
-                        if (!(Test-Path $using:LocalPath)) {
-                            New-Item -ItemType Directory -Path $using:LocalPath -Force | Out-Null
-                        }
-
-                        # Download the file
-                        Get-PnPFile -Url $fileUrl -Path $using:LocalPath -FileName $fileName -AsFile -Force -ErrorAction Stop
-                        $logQueue.Enqueue("Downloaded file: $fileUrl")
+                    catch {
+                        $errorQueue.Enqueue("Error downloading file '$fileUrl': $_")
                     }
-                }
-                catch {
-                    $errorQueue.Enqueue("Error downloading file '$fileUrl': $_")
-                }
-            } -ArgumentList $_, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue -ThrottleLimit 10
+                } -ArgumentList $fileUrl, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue
+            }
+
+            # Wait for all jobs to complete
+            $jobs | Wait-Job | Receive-Job
+
+            # Remove completed jobs
+            $jobs | Remove-Job
         }
 
         # Process subfolders recursively
