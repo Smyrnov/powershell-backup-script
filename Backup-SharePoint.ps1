@@ -1,3 +1,5 @@
+# Requires PowerShell 7 or later
+
 # Parameters
 param(
     [Parameter(Mandatory = $true)]
@@ -13,10 +15,45 @@ param(
     [string]$TenantId,
 
     [Parameter(Mandatory = $false)]
-    [string]$SubFolderServerRelativeUrl,  # Optional parameter for subfolder
+    [string]$SubFolderServerRelativeUrl,  # Server-relative URL of the library or folder
+
+    [Parameter(Mandatory = $false)]
+    [datetime]$LastModifiedDate,          # Optional parameter for filtering based on last modified date
+
+    [Parameter(Mandatory = $false)]
+    [datetime]$CreatedDate,               # Optional parameter for filtering based on created date
 
     [string]$LogFilePath
 )
+
+# Ensure PowerShell 7 or later is being used
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Error "This script requires PowerShell version 7 or later."
+    exit 1
+}
+
+# Import necessary .NET namespaces
+Add-Type -AssemblyName System.Collections.Concurrent
+
+# Initialize concurrent queues for logs and errors
+$logQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$errorQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+
+# Function to enqueue logs
+function Enqueue-Log {
+    param (
+        [string]$Message
+    )
+    $logQueue.Enqueue($Message)
+}
+
+# Function to enqueue errors
+function Enqueue-ErrorLog {
+    param (
+        [string]$Message
+    )
+    $errorQueue.Enqueue($Message)
+}
 
 # Set default log file path if not provided
 if (-not $LogFilePath) {
@@ -28,56 +65,60 @@ if (-not $LogFilePath) {
     $LogFilePath = Join-Path $LogDirectory "BackupLog_$timestamp.txt"
 }
 
-# Logging function
-function Write-Log {
-    param (
-        [string]$Message,
-        [string]$Level = "INFO"
-    )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] [$Level] $Message"
-    Write-Host $logEntry
-    $logEntry | Out-File -FilePath $LogFilePath -Append -Encoding UTF8
-}
-
 # Start logging
-Write-Log "Backup script started."
+Enqueue-Log "Backup script started."
 
 # Install PnP.PowerShell Module if not already installed
 if (!(Get-Module -ListAvailable -Name PnP.PowerShell)) {
-    Write-Log "Installing PnP.PowerShell module."
-    Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber
+    Enqueue-Log "Installing PnP.PowerShell module."
+    try {
+        Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Enqueue-Log "PnP.PowerShell module installed successfully."
+    }
+    catch {
+        Enqueue-ErrorLog "Error installing PnP.PowerShell module: $_"
+        # Exit if module installation fails
+        $FinalError = "Error installing PnP.PowerShell module: $_"
+        $errorQueue.Enqueue($FinalError)
+        goto Finalize
+    }
 }
 
 # Connect to SharePoint Online Site using the registered Entra ID application
 try {
-    Write-Log "Connecting to SharePoint Online site: $SiteUrl"
-    Connect-PnPOnline -Url $SiteUrl -ClientId $ClientId -Tenant $TenantId -Interactive
-    Write-Log "Successfully connected to SharePoint Online."
+    Enqueue-Log "Connecting to SharePoint Online site: $SiteUrl"
+    Connect-PnPOnline -Url $SiteUrl -ClientId $ClientId -Tenant $TenantId -Interactive -ErrorAction Stop
+    Enqueue-Log "Successfully connected to SharePoint Online."
 }
 catch {
-    Write-Log "Error connecting to SharePoint Online: $_" "ERROR"
-    exit 1
+    Enqueue-ErrorLog "Error connecting to SharePoint Online: $_"
+    # Exit if connection fails
+    $FinalError = "Error connecting to SharePoint Online: $_"
+    $errorQueue.Enqueue($FinalError)
+    goto Finalize
 }
 
 # Get the site object to use in URL conversions
 try {
-    $Site = Get-PnPWeb
-    Write-Log "Retrieved Site Object: $($Site.Title)"
+    $Site = Get-PnPWeb -ErrorAction Stop
 }
 catch {
-    Write-Log "Error retrieving Site Object: $_" "ERROR"
-    Disconnect-PnPOnline
-    exit 1
+    Enqueue-ErrorLog "Error retrieving site information: $_"
+    $FinalError = "Error retrieving site information: $_"
+    $errorQueue.Enqueue($FinalError)
+    goto Finalize
 }
 
-# Function to download files recursively with underscore filtering
+# Function to download files recursively with underscore filtering and parallel processing
 function Download-Files {
     param (
         [string]$ServerRelativeUrl,
-        [string]$LocalPath
+        [string]$LocalPath,
+        [datetime]$LastModifiedDate,
+        [datetime]$CreatedDate
     )
-    Write-Log "Processing: $ServerRelativeUrl"
+
+    Enqueue-Log "Processing: $ServerRelativeUrl"
 
     # Try to get the folder
     try {
@@ -91,70 +132,134 @@ function Download-Files {
     if ($isFolder) {
         # It's a folder, check if it contains an underscore
         if ($folder.Name -notmatch '_') {
-            Write-Log "Skipped folder (no underscore): $ServerRelativeUrl" "INFO"
+            Enqueue-Log "Skipped folder (no underscore): $ServerRelativeUrl"
             return
         }
 
-        Write-Log "Folder contains underscore: $($folder.Name)"
+        Enqueue-Log "Folder contains underscore: $($folder.Name)"
 
         # Convert Server-Relative URL to Site-Relative URL
-        if ($Site.ServerRelativeUrl -ne "/") {
-            $SiteRelativeUrl = $ServerRelativeUrl.Substring($Site.ServerRelativeUrl.Length).TrimStart('/')
-        }
-        else {
-            $SiteRelativeUrl = $ServerRelativeUrl.TrimStart('/')
-        }
+        $SiteRelativeUrl = $ServerRelativeUrl.Substring($Site.ServerRelativeUrl.Length).TrimStart('/')
 
         # Get items in the folder
         try {
-            $items = Get-PnPFolderItem -FolderSiteRelativeUrl $SiteRelativeUrl -ItemType All
-            Write-Log "Number of items retrieved: $($items.Count)"
+            $items = Get-PnPFolderItem -FolderSiteRelativeUrl $SiteRelativeUrl -ItemType All -ErrorAction Stop
+            Enqueue-Log "Number of items retrieved: $($items.Count)"
         }
         catch {
-            Write-Log "Error retrieving items from folder '$ServerRelativeUrl': $_" "ERROR"
+            Enqueue-ErrorLog "Error retrieving items from folder '$ServerRelativeUrl': $_"
             return
         }
+
+        # Prepare lists for parallel processing
+        $foldersToProcess = @()
+        $filesToDownload = @()
 
         foreach ($item in $items) {
             if ($item.Folder -ne $null) {
                 # It's a subfolder
                 $folderName = $item.Name
-
-                # Check if subfolder contains an underscore
-                if ($folderName -notmatch '_') {
-                    Write-Log "Skipped subfolder (no underscore): $($item.Folder.ServerRelativeUrl)" "INFO"
-                    continue
-                }
-
                 $subFolderServerRelativeUrl = $item.Folder.ServerRelativeUrl
-                $subFolderPath = Join-Path $LocalPath $folderName
 
-                Write-Log "Processing subfolder with underscore: $subFolderServerRelativeUrl"
-
-                if (!(Test-Path $subFolderPath)) {
-                    New-Item -ItemType Directory -Path $subFolderPath | Out-Null
+                if ($folderName -match '_') {
+                    $foldersToProcess += $subFolderServerRelativeUrl
                 }
-
-                # Recurse into subfolder
-                Download-Files -ServerRelativeUrl $subFolderServerRelativeUrl -LocalPath $subFolderPath
+                else {
+                    Enqueue-Log "Skipped subfolder (no underscore): $subFolderServerRelativeUrl"
+                }
             }
             elseif ($item.File -ne $null) {
-                $fileName = $item.Name
-                Write-Log "Processing file with underscore: $($item.File.ServerRelativeUrl)"
+                # It's a file (no filtering on file names)
+                $fileServerRelativeUrl = $item.File.ServerRelativeUrl
+                $filesToDownload += $fileServerRelativeUrl
+            }
+        }
+
+        # Download files in parallel
+        if ($filesToDownload.Count -gt 0) {
+            Enqueue-Log "Starting parallel download of $($filesToDownload.Count) files from $ServerRelativeUrl"
+
+            $filesToDownload | ForEach-Object -Parallel {
+                param($fileUrl, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue)
+
                 try {
-                    # Download the file
-                    Get-PnPFile -Url $item.File.ServerRelativeUrl -Path $LocalPath -FileName $fileName -AsFile -Force
-                    Write-Log "Downloaded file: $($item.File.ServerRelativeUrl)"
+                    # Determine the local file path
+                    $fileName = Split-Path $fileUrl -Leaf
+                    $destinationPath = Join-Path $using:LocalPath $fileName
+
+                    $downloadFile = $true
+
+                    if ($using:LastModifiedDate -or $using:CreatedDate) {
+                        if (Test-Path $destinationPath) {
+                            # Get the local file's last write time
+                            $localLastWrite = (Get-Item $destinationPath).LastWriteTime
+
+                            # Get the SharePoint file's last modified and creation dates
+                            $spFile = Get-PnPFile -Url $fileUrl -AsListItem -ErrorAction Stop
+                            $spLastModified = [datetime]$spFile["Modified"]
+                            $spCreated = [datetime]$spFile["Created"]
+
+                            # Determine if file should be downloaded
+                            $shouldDownload = $false
+
+                            if ($using:LastModifiedDate) {
+                                if ($spLastModified -gt $using:LastModifiedDate) {
+                                    $shouldDownload = $true
+                                }
+                            }
+
+                            if ($using:CreatedDate) {
+                                if ($spCreated -gt $using:CreatedDate) {
+                                    $shouldDownload = $true
+                                }
+                            }
+
+                            if (-not $shouldDownload) {
+                                # Skip downloading
+                                $logQueue.Enqueue("Skipped file (not created/modified after specified dates): $fileUrl")
+                                $downloadFile = $false
+                            }
+                        }
+                        else {
+                            # File does not exist locally; download it
+                            $downloadFile = $true
+                        }
+                    }
+
+                    if ($downloadFile) {
+                        # Ensure the local directory exists
+                        if (!(Test-Path $using:LocalPath)) {
+                            New-Item -ItemType Directory -Path $using:LocalPath -Force | Out-Null
+                        }
+
+                        # Download the file
+                        Get-PnPFile -Url $fileUrl -Path $using:LocalPath -FileName $fileName -AsFile -Force -ErrorAction Stop
+                        $logQueue.Enqueue("Downloaded file: $fileUrl")
+                    }
                 }
                 catch {
-                    Write-Log "Error downloading file '$($item.File.ServerRelativeUrl)': $_" "ERROR"
+                    $errorQueue.Enqueue("Error downloading file '$fileUrl': $_")
                 }
+            } -ArgumentList $_, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue -ThrottleLimit 10
+        }
+
+        # Process subfolders recursively
+        foreach ($subFolder in $foldersToProcess) {
+            # Determine the local path for the subfolder
+            $folderName = Split-Path $subFolder -Leaf
+            $subFolderLocalPath = Join-Path $LocalPath $folderName
+
+            if (!(Test-Path $subFolderLocalPath)) {
+                New-Item -ItemType Directory -Path $subFolderLocalPath | Out-Null
             }
+
+            # Recurse into the subfolder
+            Download-Files -ServerRelativeUrl $subFolder -LocalPath $subFolderLocalPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
         }
     }
     else {
         # It might be a Document Library
-        Write-Log "Attempting to retrieve items from Document Library at '$ServerRelativeUrl'"
+        Enqueue-Log "Attempting to retrieve items from Document Library at '$ServerRelativeUrl'"
 
         # Get the list (Document Library)
         try {
@@ -162,115 +267,234 @@ function Download-Files {
             if ($null -eq $list) {
                 throw "No list found at '$ServerRelativeUrl'"
             }
-            Write-Log "Found Document Library: $($list.Title)"
+            # Check if the Document Library name contains an underscore
+            if ($list.Title -notmatch '_') {
+                Enqueue-Log "Skipped Document Library (no underscore): $ServerRelativeUrl"
+                return
+            }
+            Enqueue-Log "Found Document Library: $($list.Title)"
         }
         catch {
-            Write-Log "Error retrieving Document Library at '$ServerRelativeUrl': $_" "ERROR"
+            Enqueue-ErrorLog "Error retrieving Document Library at '$ServerRelativeUrl': $_"
             return
         }
 
-        # Get all items in the library
+        # Get all items in the library in batches
         try {
-            $listItems = Get-PnPListItem -List $list -PageSize 1000 -Fields FileLeafRef,FileRef,FSObjType
-            Write-Log "Number of items retrieved from library: $($listItems.Count)"
+            $listItems = Get-PnPListItem -List $list -PageSize 1000 -Fields FileLeafRef,FileRef,FSObjType -ErrorAction Stop
+            Enqueue-Log "Number of items retrieved from library: $($listItems.Count)"
         }
         catch {
-            Write-Log "Error retrieving items from Document Library '$($list.Title)': $_" "ERROR"
+            Enqueue-ErrorLog "Error retrieving items from Document Library '$($list.Title)': $_"
             return
         }
+
+        # Prepare lists for parallel processing
+        $foldersToProcess = @()
+        $filesToDownload = @()
 
         foreach ($item in $listItems) {
             $fileRef = $item["FileRef"]
             $fileLeafRef = $item["FileLeafRef"]
             $isFolder = $item["FSObjType"] -eq 1
 
-            $relativePath = if ($Site.ServerRelativeUrl -ne "/") {
-                $fileRef.Substring($Site.ServerRelativeUrl.Length).TrimStart('/')
-            }
-            else {
-                $fileRef.TrimStart('/')
-            }
-            $localItemPath = Join-Path $LocalPath $relativePath
-
             if ($isFolder) {
                 # It's a folder, check if it contains an underscore
-                $folderName = Split-Path $relativePath -Leaf
-                if ($folderName -notmatch '_') {
-                    Write-Log "Skipped doclib (no underscore): $fileRef" "INFO"
-                    continue
+                $folderName = $fileLeafRef
+
+                if ($folderName -match '_') {
+                    $foldersToProcess += $fileRef
                 }
-
-                Write-Log "Processing folder with underscore: $fileRef"
-
-                if (!(Test-Path $localItemPath)) {
-                    New-Item -ItemType Directory -Path $localItemPath | Out-Null
+                else {
+                    Enqueue-Log "Skipped folder (no underscore): $fileRef"
                 }
             }
             else {
-                Write-Log "Processing file with underscore: $fileRef"
-                $localFolderPath = Split-Path $localItemPath -Parent
-                if (!(Test-Path $localFolderPath)) {
-                    New-Item -ItemType Directory -Path $localFolderPath -Force | Out-Null
-                }
-
-                try {
-                    # Download the file
-                    Get-PnPFile -Url $fileRef -Path $localFolderPath -FileName $fileLeafRef -AsFile -Force
-                    Write-Log "Downloaded file: $fileRef"
-                }
-                catch {
-                    Write-Log "Error downloading file '$fileRef': $_" "ERROR"
-                }
+                # It's a file (no filtering on file names)
+                $filesToDownload += $fileRef
             }
         }
-    }
-}
 
-# Main Execution
-if ($SubFolderServerRelativeUrl) {
-    # Start downloading from the specified subfolder or library
-    Write-Log "Backing up from: $SubFolderServerRelativeUrl"
+        # Download files in parallel
+        if ($filesToDownload.Count -gt 0) {
+            Enqueue-Log "Starting parallel download of $($filesToDownload.Count) files from Document Library '$($list.Title)'"
 
-    # Ensure the path starts with '/'
-    if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
-        $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
-    }
+            $filesToDownload | ForEach-Object -Parallel {
+                param($fileUrl, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue)
 
-    # Start downloading
-    Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $LocalBackupRoot
-}
-else {
-    # Backup all Document Libraries
-    try {
-        Write-Log "Retrieving document libraries."
-        $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
-    }
-    catch {
-        Write-Log "Error retrieving document libraries: $_" "ERROR"
-        Disconnect-PnPOnline
-        exit 1
-    }
+                try {
+                    # Determine the local file path
+                    $fileName = Split-Path $fileUrl -Leaf
+                    $destinationPath = Join-Path $using:LocalPath $fileName
 
-    foreach ($library in $libraries) {
-        $libraryTitle = $library.Title
-        $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
+                    $downloadFile = $true
 
-        # Create local directory if it doesn't exist
-        if (!(Test-Path $localLibraryPath)) {
-            New-Item -ItemType Directory -Path $localLibraryPath | Out-Null
+                    if ($using:LastModifiedDate -or $using:CreatedDate) {
+                        if (Test-Path $destinationPath) {
+                            # Get the local file's last write time
+                            $localLastWrite = (Get-Item $destinationPath).LastWriteTime
+
+                            # Get the SharePoint file's last modified and creation dates
+                            $spFile = Get-PnPFile -Url $fileUrl -AsListItem -ErrorAction Stop
+                            $spLastModified = [datetime]$spFile["Modified"]
+                            $spCreated = [datetime]$spFile["Created"]
+
+                            # Determine if file should be downloaded
+                            $shouldDownload = $false
+
+                            if ($using:LastModifiedDate) {
+                                if ($spLastModified -gt $using:LastModifiedDate) {
+                                    $shouldDownload = $true
+                                }
+                            }
+
+                            if ($using:CreatedDate) {
+                                if ($spCreated -gt $using:CreatedDate) {
+                                    $shouldDownload = $true
+                                }
+                            }
+
+                            if (-not $shouldDownload) {
+                                # Skip downloading
+                                $logQueue.Enqueue("Skipped file (not created/modified after specified dates): $fileUrl")
+                                $downloadFile = $false
+                            }
+                        }
+                        else {
+                            # File does not exist locally; download it
+                            $downloadFile = $true
+                        }
+                    }
+
+                    if ($downloadFile) {
+                        # Ensure the local directory exists
+                        if (!(Test-Path $using:LocalPath)) {
+                            New-Item -ItemType Directory -Path $using:LocalPath -Force | Out-Null
+                        }
+
+                        # Download the file
+                        Get-PnPFile -Url $fileUrl -Path $using:LocalPath -FileName $fileName -AsFile -Force -ErrorAction Stop
+                        $logQueue.Enqueue("Downloaded file: $fileUrl")
+                    }
+                }
+                catch {
+                    $errorQueue.Enqueue("Error downloading file '$fileUrl': $_")
+                }
+            } -ArgumentList $_, $LocalPath, $LastModifiedDate, $CreatedDate, $logQueue, $errorQueue -ThrottleLimit 10
         }
 
-        Write-Log "Backing up library: $libraryTitle"
+        # Process folders recursively
+        foreach ($subFolder in $foldersToProcess) {
+            # Determine the local path for the subfolder
+            $folderName = Split-Path $subFolder -Leaf
+            $subFolderLocalPath = Join-Path $LocalPath $folderName
 
-        # Start downloading from the root folder of the library
-        $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
-        Write-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl"
+            if (!(Test-Path $subFolderLocalPath)) {
+                New-Item -ItemType Directory -Path $subFolderLocalPath | Out-Null
+            }
 
-        # Proceed with the root folder (library root)
-        Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath
+            # Recurse into the subfolder
+            Download-Files -ServerRelativeUrl $subFolder -LocalPath $subFolderLocalPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
+        }
     }
-}
 
-# Disconnect from SharePoint Online
-Disconnect-PnPOnline
-Write-Log "Backup script completed."
+    # Begin the download process
+    if ($SubFolderServerRelativeUrl) {
+        # Start downloading from the specified subfolder or library
+        Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl"
+
+        # Ensure the path starts with '/'
+        if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
+            $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
+        }
+
+        # Start downloading
+        Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $LocalBackupRoot -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
+    }
+    else {
+        # Retrieve All Document Libraries
+        try {
+            Enqueue-Log "Retrieving document libraries."
+            $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
+            Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)"
+        }
+        catch {
+            Enqueue-ErrorLog "Error retrieving document libraries: $_"
+            goto Finalize
+        }
+
+        foreach ($library in $libraries) {
+            $libraryTitle = $library.Title
+            $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
+
+            # Check if library name contains an underscore
+            if ($libraryTitle -notmatch '_') {
+                Enqueue-Log "Skipped Document Library (no underscore): $libraryTitle"
+                continue
+            }
+
+            # Create local directory if it doesn't exist
+            if (!(Test-Path $localLibraryPath)) {
+                New-Item -ItemType Directory -Path $localLibraryPath | Out-Null
+            }
+
+            Enqueue-Log "Backing up library: $libraryTitle"
+
+            # Start downloading from the root folder of the library
+            $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
+            Enqueue-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl"
+
+            # Proceed with the root folder (library root)
+            Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
+        }
+    }
+
+    # Finalize logging
+    Finalize:
+
+    # Write first log message to the console
+    if ($logQueue.Count -gt 0) {
+        if ($logQueue.TryDequeue([ref]$firstLog)) {
+            Write-Host $firstLog
+        }
+    }
+
+    # Write all logs to the log file
+    while ($logQueue.TryDequeue([ref]$log)) {
+        Add-Content -Path $LogFilePath -Value $log
+    }
+
+    # Write errors to the console
+    if ($errorQueue.Count -gt 0) {
+        Write-Host "Errors encountered during backup:" -ForegroundColor Red
+        while ($errorQueue.TryDequeue([ref]$errorMsg)) {
+            Write-Host $errorMsg -ForegroundColor Red
+        }
+    }
+
+    # Write last log message to the console
+    if ($logQueue.Count -gt 0) {
+        if ($logQueue.TryDequeue([ref]$lastLog)) {
+            Write-Host $lastLog
+        }
+    }
+
+    # Disconnect from SharePoint Online
+    try {
+        Disconnect-PnPOnline -ErrorAction Stop
+        Enqueue-Log "Disconnected from SharePoint Online."
+    }
+    catch {
+        Enqueue-ErrorLog "Error disconnecting from SharePoint Online: $_"
+    }
+
+    # Write completion log
+    Enqueue-Log "Backup script completed."
+
+    # Write the final log messages to the log file
+    while ($logQueue.TryDequeue([ref]$log)) {
+        Add-Content -Path $LogFilePath -Value $log
+    }
+
+    # Display a final message
+    Write-Host "Backup process finished. Check the log file at '$LogFilePath' for detailed information." -ForegroundColor Green
