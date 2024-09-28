@@ -266,11 +266,6 @@ try {
                 if ($null -eq $list) {
                     throw "No list found at '$ServerRelativeUrl'"
                 }
-                # Check if the Document Library name contains an underscore
-                if ($list.Title -notmatch '_') {
-                    Enqueue-Log "Skipped Document Library (no underscore): $ServerRelativeUrl"
-                    return
-                }
                 Enqueue-Log "Found Document Library: $($list.Title)"
             }
             catch {
