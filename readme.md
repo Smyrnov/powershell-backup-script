@@ -1,7 +1,10 @@
 # Information
 **Folders:** Only folders with an underscore in their names are processed.
+
 **Document Libraries:** Only libraries with underscores in their names are processed.
+
 **Files:** All files within the processed folders and libraries are handled based on the LastModifiedDate parameter.
+
 **Optional filtering:** ensures that only files created after **CreatedDate** or modified after **LastModifiedDate** are downloaded, thereby optimizing the backup process by avoiding unnecessary file downloads when running backup for the same SharePoint instance multiple times.
 
 ## Requirements
