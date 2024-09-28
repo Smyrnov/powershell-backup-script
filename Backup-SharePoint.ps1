@@ -397,104 +397,106 @@ function Download-Files {
             Download-Files -ServerRelativeUrl $subFolder -LocalPath $subFolderLocalPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
         }
     }
+}
 
-    # Begin the download process
-    if ($SubFolderServerRelativeUrl) {
-        # Start downloading from the specified subfolder or library
-        Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl"
+# Begin the download process
+if ($SubFolderServerRelativeUrl) {
+    # Start downloading from the specified subfolder or library
+    Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl"
 
-        # Ensure the path starts with '/'
-        if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
-            $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
-        }
-
-        # Start downloading
-        Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $LocalBackupRoot -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
-    }
-    else {
-        # Retrieve All Document Libraries
-        try {
-            Enqueue-Log "Retrieving document libraries."
-            $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
-            Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)"
-        }
-        catch {
-            Enqueue-ErrorLog "Error retrieving document libraries: $_"
-            goto Finalize
-        }
-
-        foreach ($library in $libraries) {
-            $libraryTitle = $library.Title
-            $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
-
-            # Check if library name contains an underscore
-            if ($libraryTitle -notmatch '_') {
-                Enqueue-Log "Skipped Document Library (no underscore): $libraryTitle"
-                continue
-            }
-
-            # Create local directory if it doesn't exist
-            if (!(Test-Path $localLibraryPath)) {
-                New-Item -ItemType Directory -Path $localLibraryPath | Out-Null
-            }
-
-            Enqueue-Log "Backing up library: $libraryTitle"
-
-            # Start downloading from the root folder of the library
-            $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
-            Enqueue-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl"
-
-            # Proceed with the root folder (library root)
-            Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
-        }
+    # Ensure the path starts with '/'
+    if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
+        $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
     }
 
-    # Finalize logging
-    Finalize:
-
-    # Write first log message to the console
-    if ($logQueue.Count -gt 0) {
-        if ($logQueue.TryDequeue([ref]$firstLog)) {
-            Write-Host $firstLog
-        }
-    }
-
-    # Write all logs to the log file
-    while ($logQueue.TryDequeue([ref]$log)) {
-        Add-Content -Path $LogFilePath -Value $log
-    }
-
-    # Write errors to the console
-    if ($errorQueue.Count -gt 0) {
-        Write-Host "Errors encountered during backup:" -ForegroundColor Red
-        while ($errorQueue.TryDequeue([ref]$errorMsg)) {
-            Write-Host $errorMsg -ForegroundColor Red
-        }
-    }
-
-    # Write last log message to the console
-    if ($logQueue.Count -gt 0) {
-        if ($logQueue.TryDequeue([ref]$lastLog)) {
-            Write-Host $lastLog
-        }
-    }
-
-    # Disconnect from SharePoint Online
+    # Start downloading
+    Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $LocalBackupRoot -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
+}
+else {
+    # Retrieve All Document Libraries
     try {
-        Disconnect-PnPOnline -ErrorAction Stop
-        Enqueue-Log "Disconnected from SharePoint Online."
+        Enqueue-Log "Retrieving document libraries."
+        $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
+        Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)"
     }
     catch {
-        Enqueue-ErrorLog "Error disconnecting from SharePoint Online: $_"
+        Enqueue-ErrorLog "Error retrieving document libraries: $_"
+        goto Finalize
     }
 
-    # Write completion log
-    Enqueue-Log "Backup script completed."
+    foreach ($library in $libraries) {
+        $libraryTitle = $library.Title
+        $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
 
-    # Write the final log messages to the log file
-    while ($logQueue.TryDequeue([ref]$log)) {
-        Add-Content -Path $LogFilePath -Value $log
+        # Check if library name contains an underscore
+        if ($libraryTitle -notmatch '_') {
+            Enqueue-Log "Skipped Document Library (no underscore): $libraryTitle"
+            continue
+        }
+
+        # Create local directory if it doesn't exist
+        if (!(Test-Path $localLibraryPath)) {
+            New-Item -ItemType Directory -Path $localLibraryPath | Out-Null
+        }
+
+        Enqueue-Log "Backing up library: $libraryTitle"
+
+        # Start downloading from the root folder of the library
+        $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
+        Enqueue-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl"
+
+        # Proceed with the root folder (library root)
+        Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath -LastModifiedDate $LastModifiedDate -CreatedDate $CreatedDate
     }
+}
 
-    # Display a final message
-    Write-Host "Backup process finished. Check the log file at '$LogFilePath' for detailed information." -ForegroundColor Green
+# Finalize logging
+Finalize:
+
+# Write first log message to the console
+if ($logQueue.Count -gt 0) {
+    if ($logQueue.TryDequeue([ref]$firstLog)) {
+        Write-Host $firstLog
+    }
+}
+
+# Write all logs to the log file
+while ($logQueue.TryDequeue([ref]$log)) {
+    Add-Content -Path $LogFilePath -Value $log
+}
+
+# Write errors to the console
+if ($errorQueue.Count -gt 0) {
+    Write-Host "Errors encountered during backup:" -ForegroundColor Red
+    while ($errorQueue.TryDequeue([ref]$errorMsg)) {
+        Write-Host $errorMsg -ForegroundColor Red
+    }
+}
+
+# Write last log message to the console
+if ($logQueue.Count -gt 0) {
+    if ($logQueue.TryDequeue([ref]$lastLog)) {
+        Write-Host $lastLog
+    }
+}
+
+
+# Disconnect from SharePoint Online
+try {
+    Disconnect-PnPOnline -ErrorAction Stop
+    Enqueue-Log "Disconnected from SharePoint Online."
+}
+catch {
+    Enqueue-ErrorLog "Error disconnecting from SharePoint Online: $_"
+}
+
+# Write completion log
+Enqueue-Log "Backup script completed."
+
+# Write the final log messages to the log file
+while ($logQueue.TryDequeue([ref]$log)) {
+    Add-Content -Path $LogFilePath -Value $log
+}
+
+# Display a final message
+Write-Host "Backup process finished. Check the log file at '$LogFilePath' for detailed information." -ForegroundColor Green
