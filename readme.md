@@ -24,9 +24,9 @@
 - PowerShell 7.0 or later
 - .NET Runtime
 - PnP.PowerShell Module. 
-    To install: ``Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber ``
-    To update: ``Update-Module PnP.PowerShell``
-    To verify: ``Get-Module PnP.PowerShell -ListAvailable | Select-Object Name, Version``
+    + To install: ``Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber ``
+    + To update: ``Update-Module PnP.PowerShell``
+    + To verify: ``Get-Module PnP.PowerShell -ListAvailable | Select-Object Name, Version``
 
 ## Usage Instructions
 1. Save the Script
