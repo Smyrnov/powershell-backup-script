@@ -55,12 +55,14 @@ function Enqueue-Log {
 
 # Function to process and write logs from the queue to the log file
 function Process-Logs {
+    $logEntry = $null
     while ($logQueue.TryDequeue([ref]$logEntry)) {
         Add-Content -Path $LogFilePath -Value $logEntry.Value
     }
 }
 
 function Process-Errors {
+    $errorEntry = $null
     while ($errorQueue.TryDequeue([ref]$errorEntry)) {
         Add-Content -Path $LogFilePath -Value $errorEntry.Value
     }
