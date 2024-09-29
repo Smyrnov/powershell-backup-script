@@ -56,15 +56,12 @@ function Enqueue-Log {
 # Function to process and write logs from the queue to the log file
 function Process-Logs {
     while ($logQueue.TryDequeue([ref]$logEntry)) {
-        # Access the Value property of the [ref] object
         Add-Content -Path $LogFilePath -Value $logEntry.Value
     }
 }
 
-# Function to process and write errors from the queue to the log file
 function Process-Errors {
     while ($errorQueue.TryDequeue([ref]$errorEntry)) {
-        # Access the Value property of the [ref] object
         Add-Content -Path $LogFilePath -Value $errorEntry.Value
     }
 }
@@ -164,7 +161,7 @@ function Download-Files {
             Enqueue-Log "Number of items retrieved: $($items.Count)" -Output
         }
         catch {
-            Enqueue-Log "Error retrieving items from folder '$ServerRelativeUrl': $_" -Level "ERROR" -Output
+            Enqueue-Log "Error retrieving items from folder '$ServerRelativeUrl': $_" -Level "ERROR"
             return
         }
 
@@ -190,7 +187,7 @@ function Download-Files {
                 Enqueue-Log "Created local directory: $LocalPath" -Output
             }
             catch {
-                Enqueue-Log "Error creating local directory '$LocalPath': $_" -Level "ERROR" -Output
+                Enqueue-Log "Error creating local directory '$LocalPath': $_" -Level "ERROR"
                 return
             }
         }
@@ -245,7 +242,7 @@ function Download-Files {
                 param ($subFolderUrl, $LocalPath, $logQueue, $errorQueue)
 
                 try {
-                    # Determine the folder name
+                    # Determine the subfolder name
                     $folderName = Split-Path $subFolderUrl -Leaf
                     $subFolderLocalPath = Join-Path $LocalPath $folderName
 
@@ -279,7 +276,7 @@ function Download-Files {
             Enqueue-Log "Found Document Library: $($list.Title)" -Output
         }
         catch {
-            Enqueue-Log "Error retrieving Document Library at '$ServerRelativeUrl': $_" -Level "ERROR" -Output
+            Enqueue-Log "Error retrieving Document Library at '$ServerRelativeUrl': $_" -Level "ERROR"
             return
         }
 
@@ -289,7 +286,7 @@ function Download-Files {
             Enqueue-Log "Number of items retrieved from library '$($list.Title)': $($listItems.Count)" -Output
         }
         catch {
-            Enqueue-Log "Error retrieving items from Document Library '$($list.Title)': $_" -Level "ERROR" -Output
+            Enqueue-Log "Error retrieving items from Document Library '$($list.Title)': $_" -Level "ERROR"
             return
         }
 
@@ -325,7 +322,7 @@ function Download-Files {
                 Enqueue-Log "Created local directory: $LocalPath" -Output
             }
             catch {
-                Enqueue-Log "Error creating local directory '$LocalPath': $_" -Level "ERROR" -Output
+                Enqueue-Log "Error creating local directory '$LocalPath': $_" -Level "ERROR"
                 return
             }
         }
@@ -401,100 +398,94 @@ function Download-Files {
             } -ThrottleLimit $ThrottleLimitFolders -ArgumentList $_, $LocalPath, $logQueue, $errorQueue
         }
     }
+}
 
-    # Main Execution
-    try {
-        if ($SubFolderServerRelativeUrl) {
-            # Start downloading from the specified subfolder or library
-            Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl" -Output
+# Main Execution
+try {
+    if ($SubFolderServerRelativeUrl) {
+        # Start downloading from the specified subfolder or library
+        Enqueue-Log "Backing up from: $SubFolderServerRelativeUrl" -Output
 
-            # Ensure the path starts with '/'
-            if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
-                $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
-            }
-
-            # Determine the local path for the backup
-            $folderName = Split-Path $SubFolderServerRelativeUrl -Leaf
-            $localBackupPath = Join-Path $LocalBackupRoot $folderName
-
-            # Create local directory if it doesn't exist
-            if (!(Test-Path $localBackupPath)) {
-                try {
-                    New-Item -ItemType Directory -Path $localBackupPath -Force | Out-Null
-                    Enqueue-Log "Created local backup directory: $localBackupPath" -Output
-                }
-                catch {
-                    Enqueue-Log "Error creating local backup directory '$localBackupPath': $_" -Level "ERROR" -Output
-                    exit 1
-                }
-            }
-
-            # Start downloading
-            Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $localBackupPath
+        # Ensure the path starts with '/'
+        if (-not $SubFolderServerRelativeUrl.StartsWith('/')) {
+            $SubFolderServerRelativeUrl = '/' + $SubFolderServerRelativeUrl
         }
-        else {
-            # Backup all Document Libraries
-            try {
-                Enqueue-Log "Retrieving document libraries." -Output
-                $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
-                Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)" -Output
-            }
-            catch {
-                Enqueue-Log "Error retrieving document libraries: $_" -Level "ERROR" -Output
-                Disconnect-PnPOnline
-                Process-Logs
-                exit 1
-            }
 
-            foreach ($library in $libraries) {
-                $libraryTitle = $library.Title
-                $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
+        # Determine the local path for the backup
+        $folderName = Split-Path $SubFolderServerRelativeUrl -Leaf
+        $localBackupPath = Join-Path $LocalBackupRoot $folderName
 
-                # Create local directory if it doesn't exist
-                if (!(Test-Path $localLibraryPath)) {
-                    try {
-                        New-Item -ItemType Directory -Path $localLibraryPath -Force | Out-Null
-                        Enqueue-Log "Created local library directory: $localLibraryPath" -Output
-                    }
-                    catch {
-                        Enqueue-Log "Error creating local library directory '$localLibraryPath': $_" -Level "ERROR" -Output
-                        continue
-                    }
-                }
-
-                Enqueue-Log "Backing up library: $libraryTitle" -Output
-
-                # Start downloading from the root folder of the library
-                $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
-                Enqueue-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl" -Output
-
-                # Proceed with the root folder (library root)
-                Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath
-            }
+        # Create local directory if it doesn't exist
+        if (!(Test-Path $localBackupPath)) {
+            New-Item -ItemType Directory -Path $localBackupPath -Force | Out-Null
+            Enqueue-Log "Created local backup directory: $localBackupPath" -Output
         }
-    }
-    catch {
-        Enqueue-Log "An unexpected error occurred: $_" -Level "ERROR"
-    }
-    finally {
-        # Process remaining logs
-        Process-Logs
-        Process-Errors
 
-        # Disconnect from SharePoint Online
+        # Start downloading
+        Download-Files -ServerRelativeUrl $SubFolderServerRelativeUrl -LocalPath $localBackupPath
+    }
+    else {
+        # Backup all Document Libraries
         try {
-            Disconnect-PnPOnline -ErrorAction Stop
-            Enqueue-Log "Disconnected from SharePoint Online." -Output
+            Enqueue-Log "Retrieving document libraries." -Output
+            $libraries = Get-PnPList | Where-Object { $_.BaseTemplate -eq 101 }  # 101 is the template ID for Document Library
+            Enqueue-Log "Number of document libraries retrieved: $($libraries.Count)" -Output
         }
         catch {
-            Enqueue-Log "Error disconnecting from SharePoint Online: $_" -Level "ERROR"
+            Enqueue-Log "Error retrieving document libraries: $_" -Level "ERROR"
+            Disconnect-PnPOnline
+            Process-Logs
+            exit 1
         }
 
-        # Finalize logging
-        Enqueue-Log "Backup script completed." -Output
-        Process-Logs
+        foreach ($library in $libraries) {
+            $libraryTitle = $library.Title
+            $localLibraryPath = Join-Path $LocalBackupRoot $libraryTitle
 
-        # Display a final message
-        Write-Host "Backup process finished. Check the log file at '$LogFilePath' for detailed information." -ForegroundColor Green
+            # Create local directory if it doesn't exist
+            if (!(Test-Path $localLibraryPath)) {
+                try {
+                    New-Item -ItemType Directory -Path $localLibraryPath -Force | Out-Null
+                    Enqueue-Log "Created local library directory: $localLibraryPath" -Output
+                }
+                catch {
+                    Enqueue-Log "Error creating local library directory '$localLibraryPath': $_" -Level "ERROR"
+                    continue
+                }
+            }
+
+            Enqueue-Log "Backing up library: $libraryTitle" -Output
+
+            # Start downloading from the root folder of the library
+            $rootFolderServerRelativeUrl = $library.RootFolder.ServerRelativeUrl
+            Enqueue-Log "Root folder Server Relative URL: $rootFolderServerRelativeUrl" -Output
+
+            # Proceed with the root folder (library root)
+            Download-Files -ServerRelativeUrl $rootFolderServerRelativeUrl -LocalPath $localLibraryPath
+        }
     }
+}
+catch {
+    Enqueue-Log "An unexpected error occurred: $_" -Level "ERROR"
+}
+finally {
+    # Process remaining logs
+    Process-Logs
+    Process-Errors
+
+    # Disconnect from SharePoint Online
+    try {
+        Disconnect-PnPOnline -ErrorAction Stop
+        Enqueue-Log "Disconnected from SharePoint Online." -Output
+    }
+    catch {
+        Enqueue-Log "Error disconnecting from SharePoint Online: $_" -Level "ERROR"
+    }
+
+    # Finalize logging
+    Enqueue-Log "Backup script completed." -Output
+    Process-Logs
+
+    # Display a final message
+    Write-Host "Backup process finished. Check the log file at '$LogFilePath' for detailed information." -ForegroundColor Green
 }
